@@ -31,12 +31,18 @@ fn get_path_to_cached_file() -> String {
     format!("{home}/.config/polybar/.indexes.txt")
 }
 
+/// Read content from `file_path`
+fn read_cache(file_path: &str) -> Value {
+    let file_content = fs::read_to_string(file_path).unwrap();
+    serde_json::from_str(&file_content).unwrap()
+}
+
 /// Fetch index from Google API (at the moment, only CAC40 is available).
 ///
 /// # Returns
 ///
 /// JSON parsed as Serde Value.
-fn _fetch_index() -> Result<Value> {
+fn fetch_index() -> Result<Value> {
     let url = reqwest::Url::parse_with_params(
         "https://www.google.com/async/finance_wholepage_price_updates",
         &[
@@ -79,14 +85,10 @@ fn is_working_hours() -> bool {
     working_hours
 }
 
-/// Fetch index from Google API
+/// Check if should fetch Data from Google API
 ///
-/// If time is outside market hours, read local cache
-///
-/// # Returns
-///
-/// Json parsed as Serde Value.
-fn fetch_index() -> Result<Value> {
+/// If time is outside market hours or an internet outage, read local cache
+fn should_fetch() -> bool {
     let file_path = get_path_to_cached_file();
 
     let file_metadata = metadata(&file_path).ok();
@@ -104,20 +106,14 @@ fn fetch_index() -> Result<Value> {
         should_fetch = true;
     }
 
-    if should_fetch {
-        _fetch_index()
-    } else {
-        // Read the text file for non-working hours
-        let file_content = fs::read_to_string(file_path).unwrap();
-
-        Ok(serde_json::from_str(&file_content).unwrap())
-    }
+    should_fetch
 }
 
-fn main() -> Result<()> {
-    let json = fetch_index().unwrap();
-
+/// Find CAC40 index from json.
+fn extract_index(json: Value) -> Result<String> {
     let entities = &json["PriceUpdate"]["entities"];
+
+    let mut msg = String::new();
 
     for entity in entities.as_array().unwrap() {
         let financial_entity = &entity["financial_entity"]["common_entity_data"];
@@ -126,17 +122,37 @@ fn main() -> Result<()> {
             let value_change = &financial_entity["value_change"].as_str().unwrap();
             let percent_change = &financial_entity["percent_change"].as_str().unwrap();
 
-            let mut msg = String::new();
-            if !is_working_hours() {
-                // Market is closed !
-                msg.push_str("🔒 ")
-            }
             msg.push_str(&format!("{last_value} ({value_change}) {percent_change}"));
-            println!("{}", msg);
 
             break;
         }
     }
+
+    Ok(msg)
+}
+
+fn main() -> Result<()> {
+    let mut msg = String::new();
+
+    let json = if should_fetch() {
+        if let Ok(index) = fetch_index() {
+            index
+        } else {
+            // Internet problem ?
+            let file_path = get_path_to_cached_file();
+            msg.push_str(" (No Internet) ");
+            read_cache(&file_path)
+        }
+    } else {
+        // Read the text file for non-working hours
+        let file_path = get_path_to_cached_file();
+        msg.push_str("(C) ");
+        read_cache(&file_path)
+    };
+
+    msg.push_str(&extract_index(json).unwrap());
+
+    println!("{}", msg);
 
     Ok(())
 }
